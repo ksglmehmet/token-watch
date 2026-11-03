@@ -559,7 +559,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     HOME.mkdir(parents=True, exist_ok=True)
     EVENTS.touch(exist_ok=True)
 
-    server = QuietServer(("127.0.0.1", args.port), make_handler(vault, exts))
+    server = QuietServer((args.host, args.port), make_handler(vault, exts))
     print(f"vault-radar · {len(files)} files · ~{sum(f['tokens'] for f in files):,} tokens")
     print(f"vault  : {vault}")
     print(f"events : {EVENTS}")
@@ -627,6 +627,12 @@ def main() -> int:
     serve = sub.add_parser("serve", help="serve the live viewer")
     serve.add_argument("--vault", required=True, help="directory to watch")
     serve.add_argument("--port", type=int, default=7777)
+    serve.add_argument(
+        "--host",
+        default=os.environ.get("VAULT_RADAR_BIND", "127.0.0.1"),
+        help="bind address (default 127.0.0.1; a container uses 0.0.0.0 and publishes the port "
+        "on the host's loopback only). Requests must still name a loopback Host.",
+    )
     serve.add_argument("--ext", default=".md", help="comma-separated extensions (default: .md)")
     serve.add_argument("--no-open", action="store_true", help="do not open a window")
     serve.add_argument("--width", type=int, default=520, help="docked window width (default: 520)")

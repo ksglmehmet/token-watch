@@ -39,6 +39,7 @@ gösterir ve o turda okunan token'ı kasanın toplamıyla karşılaştırır.
   - [2. Hook'u Claude Code ayarlarına ekle](#2-hooku-claude-code-ayarlarına-ekle)
   - [3a. Tarayıcı görüntüleyicisi](#3a-tarayıcı-görüntüleyicisi)
   - [3b. Obsidian eklentisi](#3b-obsidian-eklentisi)
+- [Docker ile çalıştırma](#docker-ile-çalıştırma)
 - [Kullanım](#kullanım)
 - [Renkler ve durumlar](#renkler-ve-durumlar)
 - [Seçenekler](#seçenekler)
@@ -112,6 +113,8 @@ noktadır.
 - **Claude Code** (hook desteğiyle)
 - İsteğe bağlı: **Obsidian 1.4+** (eklenti için; 1.13.7'de doğrulandı)
 - Windows 10/11, macOS veya Linux
+- İsteğe bağlı: **Docker** (görüntüleyici sunucusunu konteynerde çalıştırmak için; bkz.
+  [Docker ile çalıştırma](#docker-ile-çalıştırma))
 
 ## Kurulum
 
@@ -244,6 +247,117 @@ Eklenti komutları: **Clear radar highlighting**, **Reconnect to event log**,
 > zarar vermez. Kodu kasa içine kopyalanır; kasan git ile sürümleniyorsa
 > `.obsidian/plugins/` klasörünü `.gitignore`'a eklemeyi düşün.
 
+## Docker ile çalıştırma
+
+Görüntüleyici sunucusu (`radar.py serve`) bir konteyner olarak paketlenmiştir. İmaj
+`python:3.12-slim` tabanlıdır ve bu taban birden çok mimari için yayınlandığından **Intel/AMD
+PC'lerde, Apple Silicon Mac'lerde ve ARM sunucularda** aynı komutla derlenir. Ek Python paketi
+yoktur; imaj ~120 MB'tır.
+
+### Hangi parça nerede çalışır?
+
+| Parça | Nerede | Neden |
+|---|---|---|
+| Sunucu + görüntüleyici | **Konteyner** | Uzun süre açık kalan bağımsız bir servis |
+| Hook | Ana makine (önerilen) | Claude Code onu her araç çağrısında ana makinede başlatır |
+| Obsidian eklentisi | Ana makine | Obsidian'ın içinde çalışır |
+
+Hook ve konteyner, ana makinedeki `~/.vault-radar/events.jsonl` dosyası üzerinden konuşur:
+hook dosyaya yazar, konteyner onu bind mount ile okur.
+
+### Hızlı başlangıç (Docker Compose)
+
+```bash
+cp env.example .env              # Windows PowerShell: Copy-Item env.example .env
+# .env içinde VAULT_PATH'i not klasörüne ayarla (Windows'ta ileri eğik çizgi: C:/Users/sen/Kasa)
+docker compose up -d --build
+```
+
+Ardından `http://localhost:7777` (ya da `http://localhost:7777/?wide=1`). Hook'u
+[2. adımdaki](#2-hooku-claude-code-ayarlarına-ekle) gibi ana makinede kurmuş olman yeterli.
+
+| `.env` değişkeni | Varsayılan | Anlamı |
+|---|---|---|
+| `VAULT_PATH` | **zorunlu** | Not klasörü; konteynere **salt okunur** bağlanır (`/vault`) |
+| `RADAR_DATA` | `~/.vault-radar` | Hook'un olay dosyasının klasörü (`/data`); SIFIRLA düğmesi için yazılabilir |
+| `RADAR_PORT` | `7777` | Ana makinedeki port (yalnızca `127.0.0.1`'de açılır) |
+| `VAULT_RADAR_CPT` | `3.8` | Token başına karakter (Türkçe ≈3,6) |
+| `RADAR_UID` / `RADAR_GID` | `1000` | Yalnızca Linux: kendi `id -u` / `id -g` değerin |
+
+Sık kullanılan komutlar:
+
+```bash
+docker compose logs -f           # sunucu çıktısı
+docker compose ps                # durum (sağlık kontrolü: healthy)
+docker compose restart           # kasaya not eklediysen yeniden tara
+docker compose down              # durdur ve kaldır
+```
+
+### Compose olmadan
+
+```bash
+docker build -t token-watch .
+docker run -d --name token-watch --restart unless-stopped \
+  -p 127.0.0.1:7777:7777 \
+  -v "/yol/kasan:/vault:ro" \
+  -v "$HOME/.vault-radar:/data" \
+  -e VAULT_RADAR_CPT=3.6 \
+  token-watch
+```
+
+Windows PowerShell'de satır devamı için `\` yerine `` ` `` kullan ve yolları
+`C:/Users/sen/...` biçiminde yaz.
+
+Başka bir mimari için imaj üretmek (ör. ARM sunucuya taşımak):
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t <kayıt>/token-watch:latest --push .
+```
+
+### Python'u olmayan makinede hook
+
+Hook da aynı imajla çalıştırılabilir. Ayar dosyasındaki `command` değerini şöyle yap:
+
+```json
+"command": "docker run --rm -i -v $HOME/.vault-radar:/data token-watch hook"
+```
+
+Windows'ta Claude Code hook'ları Git Bash ile çalıştırır. Git Bash `C:/...:/data` biçimindeki
+yolu bozmasın diye başına `MSYS_NO_PATHCONV=1` ekle:
+
+```json
+"command": "MSYS_NO_PATHCONV=1 docker run --rm -i -v C:/Users/sen/.vault-radar:/data token-watch hook"
+```
+
+İmajın önceden derlenmiş olması gerekir (`docker build -t token-watch .` ya da
+`docker compose build`).
+
+> Bu yöntem çalışır ama **her araç çağrısına ~3 sn** ekler (konteyner başlatma süresi; ana
+> makinedeki Python ile ~1 sn). Python kurulabiliyorsa ana makinede çalıştırmak çok daha hızlıdır.
+
+### Güvenlik ayarları
+
+Compose dosyası konteyneri sıkılaştırılmış biçimde başlatır:
+
+- Port yalnızca **`127.0.0.1`**'de yayınlanır; ağdaki başka makineler erişemez. Konteyner içinde
+  `0.0.0.0` dinlenir, ama sunucu yine yalnızca loopback `Host` başlığı taşıyan istekleri kabul
+  eder (başka bir `Host` → 403).
+- Not klasörü **salt okunur** bağlanır; konteyner notlarını değiştiremez.
+- Yetkisiz kullanıcı (`radar`, uid 1000), salt okunur kök dosya sistemi (`read_only`),
+  tüm Linux yetenekleri düşürülmüş (`cap_drop: ALL`), `no-new-privileges`.
+- Yalnızca `radar.py` ve `ui/` imaja girer (`.dockerignore`); `.env`, `CLAUDE.md` ve sırlar
+  derleme bağlamına alınmaz.
+
+### Docker sorunları
+
+| Belirti | Çözüm |
+|---|---|
+| `set VAULT_PATH in .env` hatası | `.env` dosyasını oluştur ve `VAULT_PATH`'i doldur |
+| Görüntüleyici açılıyor ama hiçbir şey yanmıyor | `RADAR_DATA` hook'un yazdığı klasörle aynı mı? `docker compose logs` içindeki `events :` satırı `/data/events.jsonl` olmalı; ana makinede `~/.vault-radar/events.jsonl` büyüyor mu? |
+| Linux'ta `Permission denied` (`/data`) | `.env` içinde `RADAR_UID`/`RADAR_GID` değerlerini kendi `id -u`/`id -g` değerinle eşle |
+| Windows'ta `failed to connect to the docker API` | Docker Desktop'ı başlat |
+| Yeni notlar görünmüyor | Kasa açılışta taranır; `docker compose restart` |
+
 ## Kullanım
 
 1. Görüntüleyiciyi ya da Obsidian grafiğini aç.
@@ -287,6 +401,7 @@ python radar.py serve --vault <yol> [--port 7777] [--ext .md,.txt] [--no-open] [
 |---|---|---|
 | `--vault` | zorunlu | İzlenecek klasör |
 | `--port` | `7777` | Görüntüleyici portu |
+| `--host` / `VAULT_RADAR_BIND` | `127.0.0.1` | Dinlenecek adres (konteynerde `0.0.0.0`) |
 | `--ext` | `.md` | İzlenecek uzantılar (virgülle) |
 | `--no-open` | kapalı | Pencere açma |
 | `--width` | `520` | Yapışık pencere genişliği (px) |
@@ -359,6 +474,10 @@ token-watch/
 │   ├── main.js                 # Obsidian grafiğini boyayan eklenti
 │   └── manifest.json
 ├── install-obsidian-plugin.sh  # eklenti kurulum betiği (macOS / Linux)
+├── Dockerfile                  # sunucu imajı (python:3.12-slim, çok mimarili)
+├── docker-compose.yml          # loopback'e bağlı, sıkılaştırılmış servis tanımı
+├── env.example                 # compose ayarlarının şablonu (.env olarak kopyala)
+├── .dockerignore
 ├── assets/                     # README görselleri
 ├── README.vault-radar.md       # upstream'in orijinal İngilizce belgesi
 ├── CONTRIBUTING.md             # upstream katkı kuralları

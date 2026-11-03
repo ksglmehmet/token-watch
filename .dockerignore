@@ -1,0 +1,27 @@
+# Only radar.py and ui/ go into the image; keep everything else out of the build context.
+.git
+.gitignore
+.dockerignore
+.github
+assets
+obsidian-plugin
+install-obsidian-plugin.sh
+README*.md
+CONTRIBUTING.md
+LICENSE
+Dockerfile
+docker-compose.yml
+.env
+.env.*
+*.pem
+*.key
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude
+.vault-radar
+events.jsonl
+__pycache__
+*.pyc
+.venv
+node_modules

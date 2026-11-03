@@ -1,0 +1,35 @@
+# token-watch — viewer server.
+#
+# Copy env.example to .env next to this file and set the paths, then:
+#   docker compose up -d --build
+#   open http://localhost:7777   (or http://localhost:7777/?wide=1)
+#
+# The hook still runs on the host and writes ~/.vault-radar/events.jsonl;
+# this container only reads that file and serves the viewer.
+
+services:
+  token-watch:
+    build: .
+    image: token-watch:latest
+    container_name: token-watch
+    restart: unless-stopped
+    ports:
+      # Loopback only: the viewer and its event log never leave this machine.
+      - "127.0.0.1:${RADAR_PORT:-7777}:7777"
+    volumes:
+      # The notes, read-only. The viewer only needs names, sizes and [[links]].
+      - "${VAULT_PATH:?set VAULT_PATH in .env to your vault folder}:/vault:ro"
+      # The hook's event log. Read-write: the RESET button deletes the file.
+      - "${RADAR_DATA:-~/.vault-radar}:/data"
+    environment:
+      VAULT_RADAR_CPT: "${VAULT_RADAR_CPT:-3.8}"
+    # Linux hosts: match your own UID/GID so files in /data stay yours (`id -u`, `id -g`).
+    # Docker Desktop (Windows/macOS) does not need this.
+    user: "${RADAR_UID:-1000}:${RADAR_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
