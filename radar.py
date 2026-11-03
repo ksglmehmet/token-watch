@@ -42,6 +42,8 @@ CHARS_PER_TOKEN = _ratio(os.environ.get("VAULT_RADAR_CPT", "3.8"))
 
 READ_TOOLS = {"Read", "NotebookRead"}
 SCAN_TOOLS = {"Grep", "Glob"}
+# PowerShell is the primary shell for Claude Code on Windows.
+SHELL_TOOLS = {"Bash", "PowerShell"}
 
 
 # ──────────────────────────────────────────── hook
@@ -68,8 +70,8 @@ def _extract(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return None
         return {"kind": "read", "path": path, "tool": tool}
 
-    if tool == "Bash":
-        return _from_shell(tin.get("command") or "")
+    if tool in SHELL_TOOLS:
+        return _from_shell(tin.get("command") or "", tool)
 
     if tool in SCAN_TOOLS or tool.lower() in {"search", "codesearch"}:
         hits = _scan_hits(payload.get("tool_response"))
@@ -84,11 +86,16 @@ def _extract(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-_SHELL_READ = re.compile(r"\b(?:cat|bat|head|tail|less|more)\b\s+((?:[^|;&<>\n]+))")
-_SHELL_SCAN = re.compile(r"\b(?:rg|grep|ag|ack|fd|find)\b")
+_SHELL_READ = re.compile(
+    r"(?:\b(?:cat|bat|head|tail|less|more|gc)\b|(?<![\w-])Get-Content\b)\s+((?:[^|;&<>\n]+))",
+    re.IGNORECASE,
+)
+_SHELL_SCAN = re.compile(r"\b(?:rg|grep|ag|ack|fd|find)\b|(?<![\w-])(?:Select-String|Get-ChildItem)\b", re.IGNORECASE)
+# "C:\path\x.md:12:match" — keep the drive letter when splitting grep -n output.
+_GREP_PATH = re.compile(r"^((?:[A-Za-z]:)?[^:]*)")
 
 
-def _from_shell(command: str) -> Optional[Dict[str, Any]]:
+def _from_shell(command: str, tool: str = "Bash") -> Optional[Dict[str, Any]]:
     """Agents often read through the shell (`cat notes/x.md`) instead of the Read tool.
 
     Without this the radar looks broken on exactly the sessions that do the most work.
@@ -103,14 +110,14 @@ def _from_shell(command: str) -> Optional[Dict[str, Any]]:
         for token in m.group(1).split():
             if token.startswith("-") or token in {"|", ";", "&&"}:
                 continue
-            token = token.strip("'\"")
+            token = token.strip("'\"`,()")
             if "." in os.path.basename(token):
                 paths.append(token)
         if paths:
-            return {"kind": "read", "path": paths[0], "tool": "Bash", "via": "shell"}
+            return {"kind": "read", "path": paths[0], "tool": tool, "via": "shell"}
 
     if _SHELL_SCAN.search(command):
-        return {"kind": "scan", "tool": "Bash", "pattern": command[:80], "hits": [], "via": "shell"}
+        return {"kind": "scan", "tool": tool, "pattern": command[:80], "hits": [], "via": "shell"}
 
     return None
 
@@ -152,8 +159,8 @@ def _scan_hits(response: Any) -> List[str]:
     for line in text.splitlines():
         line = line.strip()
         # "path:12:match" (grep -n) or a bare path (grep -l / glob)
-        candidate = line.split(":", 1)[0] if ":" in line else line
-        if candidate.startswith(("/", "./", "~")) or candidate.endswith(
+        candidate = _GREP_PATH.match(line).group(1)
+        if candidate.startswith(("/", "./", "~")) or re.match(r"[A-Za-z]:[\\/]", candidate) or candidate.endswith(
             (".md", ".py", ".ts", ".tsx", ".js", ".txt", ".json")
         ):
             hits.append(candidate)
@@ -169,7 +176,9 @@ def _scan_hits(response: Any) -> List[str]:
 def cmd_hook(_args: argparse.Namespace) -> int:
     """Read one hook payload on stdin and append a radar event. Never blocks Claude."""
     try:
-        payload = json.load(sys.stdin)
+        # Claude Code sends UTF-8; on Windows sys.stdin decodes with the ANSI
+        # code page (cp1254/cp1252) and Turkish text arrives as mojibake.
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8", errors="replace"))
     except Exception:
         return 0  # a malformed payload must never break the agent's turn
 
@@ -447,7 +456,7 @@ def make_handler(vault: Path, exts: List[str]):
                 for line in current_turn():
                     self.wfile.write(b"data: " + line.encode() + b"\n\n")
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except ConnectionError:  # browser closed the tab; Windows raises ConnectionAbortedError
                 return
             last_beat = time.time()
             try:
@@ -459,7 +468,7 @@ def make_handler(vault: Path, exts: List[str]):
                         self.wfile.write(b": keep-alive\n\n")
                         self.wfile.flush()
                         last_beat = now
-            except (BrokenPipeError, ConnectionResetError):
+            except ConnectionError:  # browser closed the tab; Windows raises ConnectionAbortedError
                 return
 
     return Handler
@@ -481,6 +490,8 @@ def open_window(url: str, width: int = 520) -> None:
         shutil.which("google-chrome"),
         shutil.which("chromium"),
         shutil.which("microsoft-edge"),
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     ]
     chrome = next((p for p in chrome_paths if p and Path(p).exists()), None)
     if not chrome:
@@ -523,6 +534,21 @@ def screen_size() -> tuple:
     return 1920, 1080
 
 
+class QuietServer(ThreadingHTTPServer):
+    """A client that closes its tab mid-request is normal, not an error.
+
+    On Windows this surfaces as WinError 10053/10054 (ConnectionAbortedError /
+    ConnectionResetError) and the default handler prints a full traceback.
+    """
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):  # noqa: D401
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     vault = Path(args.vault).expanduser().resolve()
     if not vault.is_dir():
@@ -533,7 +559,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     HOME.mkdir(parents=True, exist_ok=True)
     EVENTS.touch(exist_ok=True)
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(vault, exts))
+    server = QuietServer(("127.0.0.1", args.port), make_handler(vault, exts))
     print(f"vault-radar · {len(files)} files · ~{sum(f['tokens'] for f in files):,} tokens")
     print(f"vault  : {vault}")
     print(f"events : {EVENTS}")
@@ -554,7 +580,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 # Bash is in the matcher because the agent reads through the shell too
 # (`cat notes/x.md`); _from_shell turns those into read/scan events.
-MATCHER = "Read|Grep|Glob|NotebookRead|Bash"
+MATCHER = "Read|Grep|Glob|NotebookRead|Bash|PowerShell"
 
 
 def snippet(cmd: str) -> Dict[str, Any]:

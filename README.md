@@ -1,172 +1,402 @@
-# vault-radar
+# token-watch
 
-**Watch, in real time, which files your coding agent actually reads.**
+**Kodlama ajanının (Claude Code) not kasandaki hangi dosyaları gerçekten okuduğunu canlı izle.**
 
-You ask Claude Code a question. It answers. But which of your 74 notes did it
-open — and which 69 did it never touch? `vault-radar` puts that on screen while
-it happens.
+Claude Code'a bir soru soruyorsun, cevap veriyor. Peki 90 notunun hangilerini açtı, hangilerini
+yalnızca bir aramada adıyla gördü, hangilerine hiç dokunmadı? `token-watch` bunu olurken ekranda
+gösterir ve o turda okunan token'ı kasanın toplamıyla karşılaştırır.
 
-![vault-radar](assets/cover.gif)
+![token-watch](assets/cover.gif)
 
 ```
-❯ multi-agent videomda ne anlatmıştım?
+❯ Pentaho ile alakalı bildiklerimizi anlatır mısın
 
-  ▪ index.md                                   1.102   ← read
-  ▫ themes/multi-agent.md                      1.188   ← read
-  ▫ videos/multi-agent-claude-4-bolduk.md      1.419   ← read
-  ▫ insights/token-verimliligi-talebi.md         728   ← read
-  ░ log.md                                     1.222   ← grep saw it, never opened
-  · 69 more files                                      ← never touched
+  ▪ index.md                                   ← okundu
+  ▪ entities/pentaho-server.md                 ← okundu
+  ▪ architecture/sap-pentaho-postgresql-...    ← okundu
+  ░ log.md                                     ← grep gördü, açılmadı
+  · 80 dosya daha                              ← hiç dokunulmadı
 
-  6.366 read   /   79.650 total   =   12,5× less
+  ~9.800 okunan  /  ~82.000 toplam  =  8,4× tasarruf
 ```
 
-## Why
-
-Agent memory systems are sold on a promise: the agent doesn't read everything,
-it navigates. That promise is usually invisible — you see the answer, never the
-path. `vault-radar` makes the path visible, so you can tell whether your index
-is doing its job or your agent is brute-forcing the folder.
-
-## Install
-
-Requires Python 3.9+. No dependencies.
-
-```bash
-git clone https://github.com/selmakcby/vault-radar
-cd vault-radar
-python3 radar.py install        # prints the hook config
-```
-
-Merge the printed block into `~/.claude/settings.json`, restart Claude Code, then:
-
-```bash
-python3 radar.py serve --vault ~/notes
-# open http://localhost:7777
-```
-
-Park the browser window on the right half of your screen and work as usual.
-
-## How it works
-
-Three moving parts, no magic:
-
-1. **A hook.** Claude Code fires `PostToolUse` after every tool call. `radar.py hook`
-   reads the payload on stdin and appends one JSON line to `~/.vault-radar/events.jsonl`.
-   It catches `Read`, `Grep`, `Glob` and `Bash` (agents that `cat` or `grep` from the shell are tracked too), plus `UserPromptSubmit` and `Stop`.
-2. **A server.** `radar.py serve` indexes your vault once (path, size, token estimate)
-   and tails the event log, pushing each new line over Server-Sent Events.
-3. **A viewer.** A single HTML file. Every file in your vault is one row; rows light
-   up as the agent touches them, and a small sprite walks from the prompt down to
-   whatever is being read.
-
-The hook never blocks and never throws — a malformed payload is swallowed silently.
-Radar observes; it is not allowed to break your turn.
-
-## States
-
-| | meaning |
-|---|---|
-| dim | never touched this turn |
-| yellow | a `grep`/`glob` matched it — the agent saw the **name**, not the content |
-| orange | actually opened and read into context |
-
-The yellow state is the interesting one. A search that returns forty filenames
-costs almost nothing; opening forty files costs everything. Radar shows the
-difference.
-
-## Inside Obsidian's own graph
-
-The standalone viewer draws its own graph. If you already live in Obsidian, you
-can skip it: the bundled plugin tints **Obsidian's real graph view** as the agent
-works.
-
-```bash
-./install-obsidian-plugin.sh ~/path/to/vault
-```
-
-Then in Obsidian: **Settings → Community plugins → turn off Restricted mode**,
-reload the vault, open the graph, and give your agent a prompt.
-
-The plugin reads the same `events.jsonl` directly — Obsidian runs in Electron,
-so it has Node's `fs`. **You do not need `radar.py serve` running** for this;
-the hook alone is enough.
-
-| colour | meaning |
-|---|---|
-| pale peach, enlarged | being read right now |
-| orange | read this turn |
-| amber | a search matched the name, never opened |
-| default | untouched |
-
-### The robot
-
-A small sprite is parented to the graph's own Pixi container, so it pans and
-zooms with everything else. When the agent opens a file, the robot **walks the
-edges** to get there: the plugin runs a breadth-first search over
-`renderer.links` and animates node to node along the real route. If two files
-are not connected it hops straight across, which is itself informative — it
-means that page is not reachable from where the agent just was.
-
-Toggle it, resize it, or change its speed in the plugin settings.
-
-A status-bar item counts files and estimated tokens for the current turn.
-Commands: **Clear radar highlighting**, **Reconnect to event log**.
-
-**Turn off Restricted mode.** If the toggle is awkward to find, the flag lives at
-`.obsidian/app.json` as `{"safeMode": false}` — Obsidian must be closed when you edit it.
-No paid plan is involved: Obsidian is free for personal use and community plugins
-are part of that. Sync, Publish and Catalyst are the paid products, and none of
-them are needed here.
-
-> ⚠️ **This part leans on Obsidian internals.** Verified working on **Obsidian 1.13.7**:
-> `renderer.nodeLookup[path]` resolves a node, `node.color = {a, rgb}` is what
-> `node.getFillColor()` reads, and `renderer.changed()` schedules the redraw.
-> None of that is public API. Every call is wrapped — if a release moves it, the
-> plugin stops colouring and writes `~/.vault-radar/obsidian-debug.json` describing
-> what it found instead. It will not break your vault or your graph.
-
-## Options
-
-```bash
-radar.py serve --vault ~/notes --port 7777 --ext .md,.txt
-```
-
-| flag / env | default | meaning |
-|---|---|---|
-| `--vault` | required | directory to watch |
-| `--port` | `7777` | viewer port |
-| `--ext` | `.md` | comma-separated extensions to track |
-| `--no-open` | off | do not open the docked window |
-| `--width` | `520` | docked window width in px |
-| `VAULT_RADAR_HOME` | `~/.vault-radar` | where the event log lives |
-| `VAULT_RADAR_CPT` | `3.8` | characters per token (≈4.0 English, ≈3.6 Turkish) |
-
-Token counts are **estimates from file size**, not real tokenizer output. They are
-there for proportion, not for billing.
-
-## Demo mode
-
-Open the viewer with `?demo=1`, or click **DEMO**, to replay a recorded trace
-against a fake vault. Useful for screenshots and for checking the UI without
-wiring hooks up.
-
-## Limitations
-
-- Reads are attributed by filename, so two files with the same relative path in
-  different roots can collide.
-- `Grep` hit extraction is best-effort: it parses the tool response, whose exact
-  shape is not part of any public contract and may change.
-- Single session at a time. Two concurrent Claude Code sessions write to the same
-  log and will interleave.
-- Local only, binds to `127.0.0.1`.
-
-## Licence
-
-MIT.
+> `token-watch`, Selma Kocabıyık'ın açık kaynak **[vault-radar](https://github.com/selmakcby/vault-radar)**
+> projesinin bir çatalıdır (fork). Temel tasarım ve kodun büyük kısmı ona aittir. Bu depo, aracı
+> **Windows + PowerShell** üzerinde ve Türkçe içerikle sorunsuz çalışacak hale getiren düzeltmeleri
+> ve görüntüleyici iyileştirmelerini içerir. Farklar için [Upstream'den farklar](#upstreamden-farklar)
+> bölümüne bak. Orijinal İngilizce belge: [README.vault-radar.md](README.vault-radar.md).
 
 ---
 
-Not affiliated with or endorsed by Anthropic. "Claude" and "Claude Code" are
-trademarks of Anthropic; this project only reads the hook payloads their CLI
-already emits.
+## İçindekiler
+
+- [Neden?](#neden)
+- [Nasıl çalışır?](#nasıl-çalışır)
+- [Upstream'den farklar](#upstreamden-farklar)
+- [Gereksinimler](#gereksinimler)
+- [Kurulum](#kurulum)
+  - [1. Depoyu klonla](#1-depoyu-klonla)
+  - [2. Hook'u Claude Code ayarlarına ekle](#2-hooku-claude-code-ayarlarına-ekle)
+  - [3a. Tarayıcı görüntüleyicisi](#3a-tarayıcı-görüntüleyicisi)
+  - [3b. Obsidian eklentisi](#3b-obsidian-eklentisi)
+- [Kullanım](#kullanım)
+- [Renkler ve durumlar](#renkler-ve-durumlar)
+- [Seçenekler](#seçenekler)
+- [Kasanın boyutunu ölçmek](#kasanın-boyutunu-ölçmek)
+- [Gizlilik ve güvenlik](#gizlilik-ve-güvenlik)
+- [Sorun giderme](#sorun-giderme)
+- [Sınırlamalar](#sınırlamalar)
+- [Proje yapısı](#proje-yapısı)
+- [Geliştirme ve test](#geliştirme-ve-test)
+- [Lisans ve atıf](#lisans-ve-atıf)
+
+---
+
+## Neden?
+
+Ajan hafıza sistemleri (ör. Karpathy'nin *LLM Wiki* deseni, Obsidian kasaları) bir vaatle gelir:
+ajan her şeyi okumaz, bir `index.md` üzerinden **gezinir**. Bu vaat genellikle görünmezdir; cevabı
+görürsün ama yolu görmezsin. `token-watch` yolu görünür yapar. Böylece şunları anlarsın:
+
+- İndeks sayfan işini yapıyor mu, yoksa ajan klasörü baştan sona mı tarıyor?
+- Bir soruya cevap vermek için kasanın ne kadarı bağlama (context) girdi?
+- Hangi notlar hiç okunmuyor, hangileri her soruda açılıyor?
+
+## Nasıl çalışır?
+
+Üç parça, sihir yok:
+
+```
+ Claude Code ──(hook, her araç çağrısında)──► radar.py hook ──► ~/.vault-radar/events.jsonl
+                                                                   │
+                         ┌─────────────────────────────────────────┤
+                         ▼                                         ▼
+          radar.py serve (SSE, :7777)                 Obsidian eklentisi (dosyayı doğrudan okur)
+                         ▼                                         ▼
+              tarayıcı görüntüleyicisi                  Obsidian'ın kendi grafik görünümü
+```
+
+1. **Hook.** Claude Code her araç çağrısından sonra `PostToolUse` olayını tetikler.
+   `radar.py hook` olay verisini stdin'den JSON olarak okur ve `~/.vault-radar/events.jsonl`
+   dosyasına tek satır ekler. `Read`, `Grep`, `Glob`, `Bash` ve `PowerShell` araçlarını yakalar
+   (`cat`, `head`, `Get-Content`, `Select-String` gibi kabuk okumaları dahil). Ayrıca
+   `UserPromptSubmit` (yeni soru) ve `Stop` (tur bitti) olaylarını kaydeder.
+2. **Sunucu (isteğe bağlı).** `radar.py serve` kasayı bir kez tarar (yol, boyut, token tahmini,
+   `[[wikilink]]` bağları), olay dosyasını izler ve her yeni satırı Server-Sent Events ile
+   tarayıcıya iter.
+3. **Görüntüleyici.** Tek bir HTML dosyası. Kasadaki her not bir düğümdür; ajan dokundukça düğüm
+   yanar ve küçük bir imleç sorudan okunan dosyaya doğru yürür.
+
+Hook **asla** turu bloklamaz ve hata fırlatmaz: bozuk bir veri sessizce yutulur, çıkış kodu her
+zaman 0'dır. Radar yalnızca gözlemler; ajanın işini bozmasına izin yoktur.
+
+## Upstream'den farklar
+
+| Alan | vault-radar | token-watch |
+|---|---|---|
+| PowerShell aracı | İzlenmiyor | `Get-Content`/`gc`, `Select-String`, `Get-ChildItem` okumaları ve aramaları yakalanıyor; matcher'a `PowerShell` eklendi |
+| Türkçe karakterler (Windows) | `json.load(sys.stdin)` ANSI kod sayfasıyla okuduğu için `Değiştirdim` → `DeÄŸiÅŸtirdim` | stdin her zaman UTF-8 olarak okunuyor |
+| Grep çıktısı (Windows) | `C:\yol\a.md:12:eşleşme` satırında yol `C` olarak kalıyordu | Sürücü harfi korunuyor |
+| Görüntüleyici yol eşleme | Yalnızca `/` ayıracı; Windows'ta hiçbir okuma eşleşmiyor, ekran hareketsiz | `\` ve `/` ayıraçlarının ikisi de tanınıyor |
+| Sunucu logu (Windows) | Sekme kapanınca `WinError 10053/10054` traceback'leri | Bağlantı kopmaları sessizce geçiliyor; gerçek hatalar yine yazılıyor |
+| Geniş mod | Yalnızca panel büyüyor; yazı 9px, bağlar neredeyse görünmez | Yazı, düğüm ve çizgiler ekranla ölçekleniyor; bağlar belirgin; yerleşim ekran oranına yayılıyor |
+| Doğrudan geniş açılış | — | `http://localhost:7777/?wide=1` |
+| Pencere açma (Windows) | Yalnızca macOS/Linux tarayıcı yolları | Windows Chrome/Edge yolları eklendi |
+
+Etiket davranışı upstream ile aynıdır: **yalnızca okunan** notların adı görünür; diğerleri adsız
+noktadır.
+
+## Gereksinimler
+
+- **Python 3.9+** (yalnızca standart kütüphane; ek paket yok)
+- **Claude Code** (hook desteğiyle)
+- İsteğe bağlı: **Obsidian 1.4+** (eklenti için; 1.13.7'de doğrulandı)
+- Windows 10/11, macOS veya Linux
+
+## Kurulum
+
+### 1. Depoyu klonla
+
+```bash
+git clone https://github.com/ksglmehmet/token-watch.git
+cd token-watch
+```
+
+### 2. Hook'u Claude Code ayarlarına ekle
+
+Hazır bloğu yazdır:
+
+```bash
+python radar.py install        # Windows
+python3 radar.py install       # macOS / Linux
+```
+
+Çıktıyı bir Claude Code ayar dosyasına, var olan `"hooks"` bloğuyla **birleştirerek** ekle.
+Hangi dosyayı seçtiğin, neyin izleneceğini belirler:
+
+| Dosya | Kapsam |
+|---|---|
+| `~/.claude/settings.json` | Tüm Claude Code oturumların |
+| `<proje>/.claude/settings.json` | Yalnızca o klasörden başlatılan oturumlar (**önerilen**: log daha az şey toplar) |
+
+Windows için örnek blok (yolu kendi klon yerinle değiştir; ileri eğik çizgi kullan):
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Read|Grep|Glob|NotebookRead|Bash|PowerShell",
+        "hooks": [{ "type": "command", "command": "python C:/yol/token-watch/radar.py hook" }]
+      }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "python C:/yol/token-watch/radar.py hook" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "python C:/yol/token-watch/radar.py hook" }] }
+    ]
+  }
+}
+```
+
+> **Dikkat — geçersiz JSON:** Bloğu bir web sayfasından ya da sohbetten kopyalarken `python` ile
+> yolun arasına görünmez bir **TAB** karakteri girebilir. JSON buna izin vermez ve Claude Code
+> dosyanın tamamını okuyamaz; aynı dosyadaki `permissions`/`deny` kuralların da devre dışı
+> kalabilir. Ekledikten sonra doğrula:
+>
+> ```powershell
+> python -c "import json;json.load(open('.claude/settings.json',encoding='utf-8'));print('OK')"
+> ```
+
+> **Not — auto mode:** Claude Code'un auto mode'u, ajanın kendi ayar dosyasına hook yazmasını
+> "kendi ayarını değiştirme" olarak engeller. Bu bloğu ayar dosyasına **sen** eklemelisin.
+
+Hook, ayar dosyası kaydedildikten sonra çoğu zaman açık oturumda da hemen çalışmaya başlar; emin
+olmak için Claude Code'u yeniden başlat. Çalıştığını şöyle görürsün:
+
+```powershell
+Get-Content ~/.vault-radar/events.jsonl -Tail 3      # Windows
+tail -3 ~/.vault-radar/events.jsonl                   # macOS / Linux
+```
+
+### 3a. Tarayıcı görüntüleyicisi
+
+```bash
+python radar.py serve --vault "C:/yol/kasan" --no-open
+```
+
+Açılışta kasanın özetini yazar:
+
+```
+vault-radar · 91 files · ~81,299 tokens
+vault  : C:\yol\kasan
+events : C:\Users\sen\.vault-radar\events.jsonl
+open   : http://localhost:7777
+```
+
+Tarayıcıda `http://localhost:7777` adresini aç. Komut çalıştığı sürece terminal açık kalmalı.
+
+- `--no-open` olmadan, bulunursa Chrome/Edge'de ekranın sağına yapışık, çerçevesiz bir pencere açılır.
+- Komutu **`radar.py`'nin bulunduğu klasörden** çalıştır ya da tam yolunu ver; aksi halde
+  `No such file` hatası alırsın.
+
+### 3b. Obsidian eklentisi
+
+Eklenti, Obsidian'ın **kendi grafik görünümünü** boyar ve aynı `events.jsonl` dosyasını doğrudan
+okur. Bunun için `radar.py serve` çalışıyor olmak zorunda değil; hook yeterli.
+
+**macOS / Linux:**
+
+```bash
+./install-obsidian-plugin.sh ~/yol/kasan
+```
+
+**Windows (PowerShell)** — betik `python3` beklediği için elle kurmak daha kolay:
+
+```powershell
+$vault = "C:\yol\kasan"
+New-Item -ItemType Directory -Force "$vault\.obsidian\plugins\vault-radar" | Out-Null
+Copy-Item obsidian-plugin\manifest.json, obsidian-plugin\main.js "$vault\.obsidian\plugins\vault-radar\"
+# community-plugins.json yoksa oluştur; varsa listeye "vault-radar" ekle
+if (-not (Test-Path "$vault\.obsidian\community-plugins.json")) {
+  '["vault-radar"]' | Set-Content -Encoding utf8 "$vault\.obsidian\community-plugins.json"
+}
+```
+
+Ardından Obsidian'da:
+
+1. **Ayarlar → Topluluk eklentileri → Kısıtlı modu kapat.**
+2. Kasayı yeniden yükle ve **Vault Radar**'ın açık olduğunu kontrol et.
+3. Grafik görünümünü aç (sol şeritteki grafik simgesi ya da `Ctrl+G`) ve ajana bir soru sor.
+
+Çalışıyorsa sağ alttaki durum çubuğunda `radar: …` yazısı ve grafikte küçük bir robot görünür.
+Robot, ajan bir dosyayı açtığında grafiğin **gerçek bağlantıları** üzerinden o nota yürür. İki not
+bağlı değilse doğrudan atlar; bu da o sayfanın, ajanın bulunduğu yerden link ile ulaşılamadığını
+gösterir.
+
+Eklenti komutları: **Clear radar highlighting**, **Reconnect to event log**,
+**Write graph diagnostics to disk**. Ayarlardan robot boyutu, hızı ve grep vurgusu değiştirilebilir.
+
+> ⚠️ Eklenti Obsidian'ın herkese açık olmayan iç API'sine dayanır (`renderer.nodeLookup`,
+> `node.color`, `renderer.changed()`). Bir sürüm bunları değiştirirse eklenti yalnızca boyamayı
+> bırakır ve `~/.vault-radar/obsidian-debug.json` dosyasına teşhis yazar; kasana ya da grafiğine
+> zarar vermez. Kodu kasa içine kopyalanır; kasan git ile sürümleniyorsa
+> `.obsidian/plugins/` klasörünü `.gitignore`'a eklemeyi düşün.
+
+## Kullanım
+
+1. Görüntüleyiciyi ya da Obsidian grafiğini aç.
+2. Claude Code'a kasanla ilgili bir soru sor.
+3. Ajan dosyaları okudukça düğümler yanar; alt kısımda okunan token, toplam token ve tasarruf
+   oranı güncellenir.
+4. Her yeni soru (prompt) ekranı sıfırlar; yalnızca o turun okumaları görünür.
+
+Görüntüleyici düğmeleri:
+
+| Düğme | Ne yapar |
+|---|---|
+| **GENİŞLET** | Paneli tam ekrana açar; yazı, düğüm ve bağlar ekran boyuna göre büyür |
+| **DEMO** | Kayıtlı bir izi sahte bir kasa üzerinde oynatır (hook kurmadan arayüzü denemek için) |
+| **SIFIRLA** | Olay dosyasını siler ve ekranı temizler |
+
+Yer imleri:
+
+- `http://localhost:7777/?wide=1` — doğrudan geniş modda açar
+- `http://localhost:7777/?demo=1` — demo modunda açar
+
+## Renkler ve durumlar
+
+| Görüntüleyici | Obsidian | Anlamı |
+|---|---|---|
+| gri, adsız | varsayılan | Bu turda dokunulmadı |
+| sarı | kehribar | Bir `grep`/`glob` eşleşti; ajan dosyanın **adını** gördü, içeriğini değil |
+| turuncu + ad | turuncu | Açıldı ve bağlama okundu |
+| — | açık şeftali, büyük | Şu anda okunuyor |
+
+Sarı durum ilginç olanıdır: kırk dosya adı döndüren bir arama neredeyse bedavadır, kırk dosyayı
+açmak ise pahalıdır. Radar bu farkı gösterir.
+
+## Seçenekler
+
+```bash
+python radar.py serve --vault <yol> [--port 7777] [--ext .md,.txt] [--no-open] [--width 520]
+```
+
+| Bayrak / ortam değişkeni | Varsayılan | Anlamı |
+|---|---|---|
+| `--vault` | zorunlu | İzlenecek klasör |
+| `--port` | `7777` | Görüntüleyici portu |
+| `--ext` | `.md` | İzlenecek uzantılar (virgülle) |
+| `--no-open` | kapalı | Pencere açma |
+| `--width` | `520` | Yapışık pencere genişliği (px) |
+| `VAULT_RADAR_HOME` | `~/.vault-radar` | Olay dosyasının klasörü |
+| `VAULT_RADAR_CPT` | `3.8` | Token başına karakter (İngilizce ≈4,0, Türkçe ≈3,6) |
+
+## Kasanın boyutunu ölçmek
+
+`serve` açılışta toplam dosya ve tahmini token sayısını yazar. Türkçe içerik için oranı ayarla:
+
+```powershell
+$env:VAULT_RADAR_CPT = "3.6"
+python radar.py serve --vault "C:/yol/kasan" --no-open
+```
+
+Yalnızca kelime ve karakter sayısı için, kasanın kökünde:
+
+```powershell
+Get-ChildItem -Recurse -Filter *.md | Where-Object FullName -notmatch '\\\.obsidian\\' |
+  Get-Content -Raw -Encoding UTF8 | Measure-Object -Word -Character
+```
+
+Token sayıları **dosya boyutundan tahmindir** (bayt / oran), gerçek tokenizer çıktısı değildir.
+Orantı görmek içindir, faturalama için değil. Sayıma `.md` dosyaları girer; nokta ile başlayan
+klasörler (`.obsidian`, `.git`) atlanır.
+
+## Gizlilik ve güvenlik
+
+- **Dışarıya hiçbir şey gönderilmez.** Kodda dış ağ isteği yoktur. Sunucu yalnızca `127.0.0.1`'e
+  bağlanır; Host/Origin kontrolüyle DNS rebinding ve başka sitelerden gelen isteklere kapalıdır.
+- **Olay dosyası hassas olabilir.** `~/.vault-radar/events.jsonl` şunları tutar:
+  her prompt'un **ilk 400 karakteri**, okunan dosya yolları, arama yapan kabuk komutlarının ilk 80
+  karakteri, oturum kimliği ve çalışma klasörü (`cwd`). Yerelde kalır ama şirket ya da kişisel bilgi içerebilir. Paylaşma; gerekirse
+  **SIFIRLA** düğmesiyle ya da dosyayı silerek temizle.
+- **Kapsamı dar tut.** Hook'u kullanıcı geneli yerine yalnızca ilgili proje klasörünün
+  `.claude/settings.json` dosyasına eklemek, log'a giren prompt sayısını azaltır.
+- **Gecikme.** Her hook çağrısı yeni bir Python süreci başlatır; Windows'ta çağrı başına ~1 sn
+  ölçüldü. Bu, her araç çağrısına küçük bir gecikme ekler.
+
+## Sorun giderme
+
+| Belirti | Sebep | Çözüm |
+|---|---|---|
+| `events.jsonl` hiç oluşmuyor | Hook çalışmıyor | Ayar dosyasının geçerli JSON olduğunu doğrula (TAB uyarısına bak); Claude Code'u yeniden başlat |
+| `python radar.py serve` → `No such file` | Komut başka klasörden çalıştırıldı | `radar.py`'nin klasörüne geç ya da tam yolunu ver |
+| Görüntüleyici "canlı" ama hiçbir şey yanmıyor | Okunan dosyalar `--vault` klasörünün dışında, ya da o turda hiç okuma yok | Alt kısımdaki "vault dışı: N" sayacına bak; `--vault` yolunu kontrol et |
+| Görüntüleyici "bağlanıyor"da kalıyor | Sunucu kapalı ya da port farklı | `serve` komutunun çalıştığını ve adresin portla eşleştiğini kontrol et |
+| Prompt'ta `Ã`, `Å` gibi bozuk karakterler | Eski sürüm stdin'i ANSI kod sayfasıyla okuyordu | Bu çatalı kullan; düzeltilmiş durumda |
+| Terminalde `WinError 10053/10054` | Tarayıcı sekmesi kapandı/yenilendi (zararsız) | Bu çatalda susturuldu; `serve`'ü yeniden başlat |
+| Obsidian'da renk yok | Kısıtlı mod açık ya da iç API değişti | Kısıtlı modu kapat; `~/.vault-radar/obsidian-debug.json` dosyasına bak |
+| PowerShell okumaları görünmüyor | Matcher'da `PowerShell` yok | Hook bloğundaki `matcher` değerini güncelle |
+
+## Sınırlamalar
+
+- Okumalar dosya adına göre eşlenir; farklı köklerde aynı göreli yola sahip iki dosya karışabilir.
+- `Grep` sonuçlarının ayrıştırılması en iyi çabadır: aracın yanıt biçimi herkese açık bir sözleşme
+  değildir ve değişebilir. Kabuk aramalarında (`rg`, `Select-String`) eşleşen dosyalar çıkarılmaz.
+- Aynı anda tek oturum: iki Claude Code oturumu aynı log'a yazar; görüntüleyici en son prompt
+  gönderen oturumu izler.
+- Kabuk okuma tespiti komut metnine dayalı bir tahmindir; yalnızca ilk dosya argümanı sayılır.
+- Yalnızca yerel; `127.0.0.1`'e bağlanır.
+
+## Proje yapısı
+
+```
+token-watch/
+├── radar.py                    # hook, SSE sunucusu, install çıktısı (tek dosya, bağımlılık yok)
+├── ui/index.html               # tek dosyalık canlı görüntüleyici
+├── obsidian-plugin/
+│   ├── main.js                 # Obsidian grafiğini boyayan eklenti
+│   └── manifest.json
+├── install-obsidian-plugin.sh  # eklenti kurulum betiği (macOS / Linux)
+├── assets/                     # README görselleri
+├── README.vault-radar.md       # upstream'in orijinal İngilizce belgesi
+├── CONTRIBUTING.md             # upstream katkı kuralları
+└── LICENSE                     # MIT (upstream + bu çatalın telif bildirimleri)
+```
+
+## Geliştirme ve test
+
+Test paketi yok; elle doğrulama:
+
+```bash
+# Hook bozuk girdide sessiz kalmalı ve 0 ile çıkmalı
+echo 'not json' | python radar.py hook; echo $?
+
+# Örnek olay — gerçek log'u kirletmemek için geçici bir klasör kullan
+export VAULT_RADAR_HOME=/tmp/radar-test          # PowerShell: $env:VAULT_RADAR_HOME = "$env:TEMP\radar-test"
+echo '{"hook_event_name":"UserPromptSubmit","prompt":"Değiştirdim","session_id":"t"}' | python radar.py hook
+cat /tmp/radar-test/events.jsonl                # Türkçe karakterler bozulmadan görünmeli
+```
+
+Arayüzü hook olmadan denemek için `?demo=1`. `radar.py` üçüncü parti paket almaz (upstream kuralı).
+
+Upstream güncellemelerini almak için:
+
+```bash
+git remote add upstream https://github.com/selmakcby/vault-radar.git
+git fetch upstream
+git merge upstream/main        # çakışmaları çöz; rebase değil merge
+```
+
+## Lisans ve atıf
+
+MIT — bkz. [LICENSE](LICENSE).
+
+- Orijinal eser: **vault-radar** © 2026 Selma Kocabıyık —
+  <https://github.com/selmakcby/vault-radar>
+- Windows/Türkçe düzeltmeleri ve görüntüleyici değişiklikleri: **token-watch** © 2026 Mehmet Akif KÖSOĞLU
+
+Anthropic ile bağlantılı değildir ve Anthropic tarafından onaylanmamıştır. "Claude" ve
+"Claude Code" Anthropic'in ticari markalarıdır; bu proje yalnızca Claude Code'un zaten ürettiği hook
+verisini okur.

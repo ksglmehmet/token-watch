@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+Thumbs.db
+desktop.ini
 events.jsonl
 
 # local runtime state
@@ -13,3 +15,15 @@ node_modules/
 .obsidian/
 .idea/
 .vscode/
+
+# secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+
+# local agent instructions and settings (machine/organisation specific)
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude/
